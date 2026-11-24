@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
-	"time"
 )
 
 // Oversized Go→JS events are not spliced into the JavaScript source passed to
@@ -30,6 +29,17 @@ import (
 // Instead, the payload is parked here under an unguessable id and the webview
 // is told to fetch it from the asset server, which delivers via a URL scheme
 // task and never touches the eval IPC path.
+//
+// Parked payloads are never expired by age. The original TTL sweep silently
+// dropped any event whose fetch had not happened within 30s — a real scenario
+// whenever the frontend's dispatch rate falls behind the producer's emit rate
+// (large binary streams, busy UI) — and the webview's fetch failure was
+// swallowed without a trace (wails#6619). Lossless eviction is provided by
+// other means: the byte cap below degrades overflow to inline delivery, and
+// dropWindow reclaims everything when the target window goes away. A page
+// reload can strand payloads until that window closes; they count against the
+// byte cap, so the worst case is a bounded shift toward inline delivery, not
+// data loss.
 const (
 	// maxInlineEventPayload is the largest marshalled event JSON that may be
 	// spliced directly into an eval. 8192 is the largest size measured at 0%
@@ -39,16 +49,6 @@ const (
 	// routes 8-128 KB payloads through HTTP that could have stayed inline,
 	// costing a round trip rather than correctness.
 	maxInlineEventPayload = 8192
-
-	// eventPayloadTTL bounds how long an unfetched payload is held. A page
-	// reload or a window close between dispatch and fetch would otherwise
-	// strand it forever — which would just move the leak into Go.
-	eventPayloadTTL = 30 * time.Second
-
-	// eventPayloadSweep is deliberately shorter than the TTL. Sweeping once per
-	// TTL would let an entry created just after a sweep survive until the one
-	// after that, holding it for nearly twice the documented bound.
-	eventPayloadSweep = eventPayloadTTL / 4
 
 	// eventPayloadStoreMaxBytes caps total parked bytes. On overflow the caller
 	// falls back to inline delivery: that event then pays the out-of-line
@@ -77,30 +77,25 @@ func isHexString(s string) bool {
 type parkedEventPayload struct {
 	data     []byte
 	windowID uint
-	created  time.Time
 }
 
 // eventPayloadStore holds oversized event payloads awaiting a one-shot fetch
 // from the webview.
 type eventPayloadStore struct {
-	mu      sync.Mutex
-	items   map[string]parkedEventPayload
-	bytes   int
-	closed  bool // guarded by mu; put refuses once shutdown has begun
-	janitor sync.Once
-	once    sync.Once // guards close of stop, so repeated close is safe
-	stop    chan struct{}
+	mu     sync.Mutex
+	items  map[string]parkedEventPayload
+	bytes  int
+	closed bool // guarded by mu; put refuses once shutdown has begun
 }
 
 func newEventPayloadStore() *eventPayloadStore {
 	return &eventPayloadStore{
 		items: make(map[string]parkedEventPayload),
-		stop:  make(chan struct{}),
 	}
 }
 
-// put parks a payload and returns its id. ok is false when the store is full,
-// in which case the caller must fall back to inline delivery.
+// put parks a payload and returns its id. ok is false when the store is full
+// or shut down, in which case the caller must fall back to inline delivery.
 func (s *eventPayloadStore) put(windowID uint, data []byte) (id string, ok bool) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -112,17 +107,15 @@ func (s *eventPayloadStore) put(windowID uint, data []byte) (id string, ok bool)
 	defer s.mu.Unlock()
 
 	// Refuse once shutdown has begun. Storing here afterwards would strand the
-	// payload: the reaper is gone, so nothing would ever expire it.
+	// payload: nothing would ever reclaim it.
 	if s.closed {
 		return "", false
 	}
 	if s.bytes+len(data) > eventPayloadStoreMaxBytes {
 		return "", false
 	}
-	s.items[id] = parkedEventPayload{data: data, windowID: windowID, created: time.Now()}
+	s.items[id] = parkedEventPayload{data: data, windowID: windowID}
 	s.bytes += len(data)
-
-	s.janitor.Do(func() { go s.reap() })
 	return id, true
 }
 
@@ -157,36 +150,12 @@ func (s *eventPayloadStore) dropWindow(windowID uint) {
 	}
 }
 
-func (s *eventPayloadStore) reap() {
-	ticker := time.NewTicker(eventPayloadSweep)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.stop:
-			return
-		case now := <-ticker.C:
-			s.mu.Lock()
-			for id, item := range s.items {
-				// Expired once the deadline is reached, not strictly past it.
-				if !item.created.Add(eventPayloadTTL).After(now) {
-					delete(s.items, id)
-					s.bytes -= len(item.data)
-				}
-			}
-			s.mu.Unlock()
-		}
-	}
-}
-
-// close stops the reaper and refuses further payloads. Safe to call more than
-// once and concurrently with put.
+// close refuses further payloads and reclaims everything parked. Safe to call
+// more than once and concurrently with put.
 func (s *eventPayloadStore) close() {
 	s.mu.Lock()
 	s.closed = true
 	s.items = map[string]parkedEventPayload{}
 	s.bytes = 0
 	s.mu.Unlock()
-
-	s.janitor.Do(func() {}) // consume the Once so reap can never start later
-	s.once.Do(func() { close(s.stop) })
 }

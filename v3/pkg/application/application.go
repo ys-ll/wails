@@ -345,6 +345,11 @@ func (a *App) serveEventPayload(rw http.ResponseWriter, req *http.Request) {
 
 	data, ok := a.eventPayloads.take(id, windowID)
 	if !ok {
+		// With age-based expiry removed, a miss is always an anomaly — a
+		// double fetch, a cross-window request, or a stale page reloading
+		// over an unfetched dispatch. The frontend's fetch swallows the 404
+		// (.catch), so this is the only trace the event was ever parked.
+		a.debug("event payload fetch missed", "id", id, "windowID", windowID)
 		http.NotFound(rw, req)
 		return
 	}

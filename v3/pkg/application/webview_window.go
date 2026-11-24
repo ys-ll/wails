@@ -1481,7 +1481,8 @@ const (
 	refEventJS = "if(window._wails&&window._wails.dispatchWailsEvent){var w=window._wails;" +
 		"w.__eq=(w.__eq||Promise.resolve()).then(function(){" +
 		"return fetch(%q,{cache:'no-store'}).then(function(r){return r.json();})" +
-		".then(function(e){w.dispatchWailsEvent(e);});}).catch(function(){});}"
+		".then(function(e){w.dispatchWailsEvent(e);});}).catch(function(err){" +
+		"console.error('wails: event payload fetch failed; event dropped', err);});}"
 )
 
 func (w *WebviewWindow) DispatchWailsEvent(event *CustomEvent) {
