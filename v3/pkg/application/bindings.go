@@ -131,10 +131,25 @@ func NewBindings(marshalError func(error) []byte, aliases map[uint32]uint32) *Bi
 }
 
 // Add adds the given service to the bindings.
+//
+// When the service's [ServiceOptions.MethodFilter] is set, it is applied to
+// the bare Go method names before duplicate-name and duplicate-ID validation,
+// so a filtered-out method neither triggers a collision nor is registered in
+// either lookup map.
 func (b *Bindings) Add(service Service) error {
 	methods, err := getMethods(service.Instance())
 	if err != nil {
 		return err
+	}
+
+	if filter := service.options.MethodFilter; filter != nil {
+		allowed := make([]*BoundMethod, 0, len(methods))
+		for _, method := range methods {
+			if filter(method.Name) {
+				allowed = append(allowed, method)
+			}
+		}
+		methods = allowed
 	}
 
 	marshalError := wrapErrorMarshaler(service.options.MarshalError, defaultMarshalError)

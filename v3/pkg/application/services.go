@@ -37,6 +37,23 @@ type ServiceOptions struct {
 	//
 	// If the returned slice is not nil, it must contain valid JSON.
 	MarshalError func(error) []byte
+
+	// MethodFilter, if non-nil, decides which exported methods of the
+	// service instance get bound to the frontend.
+	//
+	// The filter receives the bare Go method name as declared on the type,
+	// for example "StartTelnetServer". It never receives the fully qualified
+	// name (FQN) used by the bindings registry, for example
+	// "main.App.StartTelnetServer".
+	//
+	// Methods for which the filter returns false are not registered at all:
+	// they cannot be called by name or by ID, and they do not take part in
+	// duplicate-name or duplicate-ID detection.
+	//
+	// The optional ServiceStartup, ServiceShutdown, ServiceName and
+	// http.Handler methods are never exposed to the frontend and are not
+	// passed to the filter.
+	MethodFilter func(methodName string) bool
 }
 
 // DefaultServiceOptions specifies the default values of service options,
