@@ -2983,6 +2983,19 @@ func (w *windowsWebviewWindow) navigationCompleted(
 	// The new robust show() method handles window visibility independently
 	if !w.parent.options.Hidden {
 		if w.showRequested && !w.windowShown {
+			// Delay the first Show: right after the IsVisible cycle above the
+			// composition surface carries the renderer's bare background
+			// (black under a dark system colour scheme) for a few hundred
+			// milliseconds until the rendered page is presented. Showing the
+			// window at exactly this moment reads as a black flash on every
+			// launch; waiting here keeps that stretch inside the still-hidden
+			// window, so the first visible frame is the rendered page.
+			time.AfterFunc(500*time.Millisecond, func() {
+				if w.showRequested && !w.windowShown {
+					w.parent.Show()
+				}
+			})
+		} else {
 			w.parent.Show()
 		}
 		w.update()
